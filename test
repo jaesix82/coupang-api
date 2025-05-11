@@ -1,0 +1,214 @@
+// 쿠팡 오픈 API 접속 테스트 코드
+// express와 axios를 사용하여 간단한 서버를 만들고 쿠팡 API에 요청을 보냅니다.
+
+const express = require('express');
+const axios = require('axios');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+// 쿠팡 API 접속 정보 (환경변수로 관리)
+const COUPANG_VENDOR_ID = process.env.COUPANG_VENDOR_ID || 'YOUR_VENDOR_ID';
+const COUPANG_ACCESS_KEY = process.env.COUPANG_ACCESS_KEY || 'YOUR_ACCESS_KEY';
+const COUPANG_SECRET_KEY = process.env.COUPANG_SECRET_KEY || 'YOUR_SECRET_KEY';
+const COUPANG_API_DOMAIN = 'https://api-gateway.coupang.com';
+
+// 미들웨어 설정
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// HMAC 서명 생성 함수
+function generateHmacSignature(method, url, secretKey, timestamp) {
+  const message = `${method} ${url}\n${timestamp}`;
+  const hmac = crypto.createHmac('sha256', secretKey);
+  hmac.update(message);
+  return hmac.digest('base64');
+}
+
+// 인증 헤더 생성 함수
+function generateAuthHeader(method, uri, timestamp) {
+  const signature = generateHmacSignature(method, uri, COUPANG_SECRET_KEY, timestamp);
+  return `CEA algorithm=HmacSHA256, access-key=${COUPANG_ACCESS_KEY}, signed-date=${timestamp}, signature=${signature}`;
+}
+
+// 판매자 API - 상품 목록 조회
+async function getSellerProducts(nextToken = '') {
+  try {
+    const timestamp = new Date().toISOString();
+    const method = 'GET';
+    const basePath = `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products`;
+    
+    // 쿼리 파라미터 설정
+    const queryParams = new URLSearchParams({
+      vendorId: COUPANG_VENDOR_ID,
+      maxPerPage: 50
+    });
+    
+    if (nextToken) {
+      queryParams.append('nextToken', nextToken);
+    }
+    
+    const uri = `${basePath}?${queryParams.toString()}`;
+    const authorization = generateAuthHeader(method, uri, timestamp);
+    
+    const response = await axios({
+      method: method,
+      url: `${COUPANG_API_DOMAIN}${uri}`,
+      headers: {
+        'Authorization': authorization,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    return response.data;
+  } catch (error) {
+    console.error('API 요청 실패:', error.response ? error.response.data : error.message);
+    return { error: error.message };
+  }
+}
+
+// 판매자 API - 상품 상세 조회
+async function getProductDetail(sellerProductId) {
+  try {
+    const timestamp = new Date().toISOString();
+    const method = 'GET';
+    const uri = `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${sellerProductId}?vendorId=${COUPANG_VENDOR_ID}`;
+    const authorization = generateAuthHeader(method, uri, timestamp);
+    
+    const response = await axios({
+      method: method,
+      url: `${COUPANG_API_DOMAIN}${uri}`,
+      headers: {
+        'Authorization': authorization,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    return response.data;
+  } catch (error) {
+    console.error('API 요청 실패:', error.response ? error.response.data : error.message);
+    return { error: error.message };
+  }
+}
+
+// 판매자 API - 주문 목록 조회
+async function getSellerOrders(startDate, endDate, status = 'DELIVERED') {
+  try {
+    const timestamp = new Date().toISOString();
+    const method = 'GET';
+    
+    // 쿼리 파라미터 설정
+    const queryParams = new URLSearchParams({
+      vendorId: COUPANG_VENDOR_ID,
+      status: status,
+      createdAtFrom: startDate, // 예: '2023-01-01T00:00:00Z'
+      createdAtTo: endDate,     // 예: '2023-01-31T23:59:59Z'
+      maxPerPage: 50
+    });
+    
+    const uri = `/v2/providers/seller_api/apis/api/v1/marketplace/orders?${queryParams.toString()}`;
+    const authorization = generateAuthHeader(method, uri, timestamp);
+    
+    const response = await axios({
+      method: method,
+      url: `${COUPANG_API_DOMAIN}${uri}`,
+      headers: {
+        'Authorization': authorization,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    return response.data;
+  } catch (error) {
+    console.error('API 요청 실패:', error.response ? error.response.data : error.message);
+    return { error: error.message };
+  }
+}
+
+// API 테스트 엔드포인트
+app.get('/api/products', async (req, res) => {
+  try {
+    const nextToken = req.query.nextToken || '';
+    const result = await getSellerProducts(nextToken);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/products/:id', async (req, res) => {
+  try {
+    const productId = req.params.id;
+    const result = await getProductDetail(productId);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/orders', async (req, res) => {
+  try {
+    const startDate = req.query.startDate || getDateFormat(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000));
+    const endDate = req.query.endDate || getDateFormat(new Date());
+    const status = req.query.status || 'DELIVERED';
+    
+    const result = await getSellerOrders(startDate, endDate, status);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 날짜를 ISO 형식으로 변환하는 헬퍼 함수
+function getDateFormat(date) {
+  return date.toISOString();
+}
+
+// 간단한 웹 UI 제공
+app.get('/', (req, res) => {
+  res.send(`
+    <html>
+      <head>
+        <title>쿠팡 API 테스트</title>
+        <style>
+          body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+          h1 { color: #E74C3C; }
+          .endpoint { background: #f5f5f5; padding: 10px; margin: 10px 0; border-radius: 5px; }
+          code { background: #eee; padding: 2px 5px; border-radius: 3px; }
+        </style>
+      </head>
+      <body>
+        <h1>쿠팡 셀러 API 테스트 서버</h1>
+        <p>다음 엔드포인트로 테스트해보세요:</p>
+        
+        <div class="endpoint">
+          <h3>상품 목록 조회</h3>
+          <p>GET <code>/api/products</code></p>
+          <p>옵션: <code>nextToken</code> - 다음 페이지 토큰</p>
+        </div>
+        
+        <div class="endpoint">
+          <h3>상품 상세 조회</h3>
+          <p>GET <code>/api/products/:id</code></p>
+          <p>파라미터: <code>id</code> - 판매자 상품 ID</p>
+        </div>
+        
+        <div class="endpoint">
+          <h3>주문 목록 조회</h3>
+          <p>GET <code>/api/orders</code></p>
+          <p>옵션: <code>startDate</code> - 시작 날짜 (ISO 형식)</p>
+          <p>옵션: <code>endDate</code> - 종료 날짜 (ISO 형식)</p>
+          <p>옵션: <code>status</code> - 주문 상태 (기본값: DELIVERED)</p>
+        </div>
+      </body>
+    </html>
+  `);
+});
+
+// 서버 시작
+app.listen(port, () => {
+  console.log(`서버가 ${port} 포트에서 실행 중입니다.`);
+});
